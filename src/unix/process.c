@@ -823,40 +823,42 @@ static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
                                          int (*pipes)[2],
                                          int error_fd,
                                          pid_t* pid) {
-  sigset_t signewset;
-  sigset_t sigoldset;
-
-  /* Start the child with most signals blocked, to avoid any issues before we
-   * can reset them, but allow program failures to exit (and not hang). */
-  sigfillset(&signewset);
-  sigdelset(&signewset, SIGKILL);
-  sigdelset(&signewset, SIGSTOP);
-  sigdelset(&signewset, SIGTRAP);
-  sigdelset(&signewset, SIGSEGV);
-  sigdelset(&signewset, SIGBUS);
-  sigdelset(&signewset, SIGILL);
-  sigdelset(&signewset, SIGSYS);
-  sigdelset(&signewset, SIGABRT);
-  if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0)
-    abort();
-
-  *pid = fork();
-
-  if (*pid == 0) {
-    /* Fork succeeded, in the child process */
-    uv__process_child_init(options, stdio_count, pipes, error_fd);
-    abort();
-  }
-
-  if (pthread_sigmask(SIG_SETMASK, &sigoldset, NULL) != 0)
-    abort();
-
-  if (*pid == -1)
-    /* Failed to fork */
-    return UV__ERR(errno);
-
-  /* Fork succeeded, in the parent process */
   return 0;
+
+  // sigset_t signewset;
+  // sigset_t sigoldset;
+
+  // /* Start the child with most signals blocked, to avoid any issues before we
+  //  * can reset them, but allow program failures to exit (and not hang). */
+  // sigfillset(&signewset);
+  // sigdelset(&signewset, SIGKILL);
+  // sigdelset(&signewset, SIGSTOP);
+  // sigdelset(&signewset, SIGTRAP);
+  // sigdelset(&signewset, SIGSEGV);
+  // sigdelset(&signewset, SIGBUS);
+  // sigdelset(&signewset, SIGILL);
+  // sigdelset(&signewset, SIGSYS);
+  // sigdelset(&signewset, SIGABRT);
+  // if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0)
+  //   abort();
+
+  // *pid = fork();
+
+  // if (*pid == 0) {
+  //   /* Fork succeeded, in the child process */
+  //   uv__process_child_init(options, stdio_count, pipes, error_fd);
+  //   abort();
+  // }
+
+  // if (pthread_sigmask(SIG_SETMASK, &sigoldset, NULL) != 0)
+  //   abort();
+
+  // if (*pid == -1)
+  //   /* Failed to fork */
+  //   return UV__ERR(errno);
+
+  // /* Fork succeeded, in the parent process */
+  // return 0;
 }
 
 static int uv__spawn_and_init_child(
