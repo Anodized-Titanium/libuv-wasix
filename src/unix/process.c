@@ -35,9 +35,16 @@
 #include <fcntl.h>
 #include <poll.h>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__wasi__)
 # include <spawn.h>
 # include <paths.h>
+#endif
+
+#if defined(__wasi__)
+# include <wasi/api_wasix.h>
+#endif
+
+#if defined(__APPLE__)
 # include <sys/kauth.h>
 # include <sys/types.h>
 # include <sys/sysctl.h>
@@ -117,6 +124,47 @@ void uv__wait_children(uv_loop_t* loop) {
     process = uv__queue_data(q, uv_process_t, queue);
     q = uv__queue_next(q);
 
+#if defined(__wasi__)
+    {
+      __wasi_option_pid_t join_pid;
+      __wasi_join_status_t join_status;
+      __wasi_errno_t join_err;
+
+      memset(&join_pid, 0, sizeof(join_pid));
+      memset(&join_status, 0, sizeof(join_status));
+      join_pid.tag = 1; /* Some(pid) */
+      join_pid.u.some = process->pid;
+
+      join_err = __wasi_proc_join(&join_pid,
+                                  __WASI_JOIN_FLAGS_NON_BLOCKING,
+                                  &join_status);
+      if (join_err == 0) {
+        switch (join_status.tag) {
+        case __WASI_JOIN_STATUS_TYPE_NOTHING:
+        case __WASI_JOIN_STATUS_TYPE_STOPPED:
+          continue;
+
+        case __WASI_JOIN_STATUS_TYPE_EXIT_NORMAL:
+          pid = process->pid;
+          status = ((int) (join_status.u.exit_normal & 0xff)) << 8;
+          break;
+
+        case __WASI_JOIN_STATUS_TYPE_EXIT_SIGNAL:
+          pid = process->pid;
+          status = (int) (join_status.u.exit_signal.signal & 0x7f);
+          break;
+
+        default:
+          continue;
+        }
+      } else if (join_err == __WASI_ERRNO_CHILD ||
+                 join_err == __WASI_ERRNO_INTR) {
+        continue;
+      } else {
+        continue;
+      }
+    }
+#else
 #ifndef UV_USE_SIGCHLD
     if ((process->flags & UV_HANDLE_REAP) == 0)
       continue;
@@ -134,6 +182,7 @@ void uv__wait_children(uv_loop_t* loop) {
 #ifdef UV_USE_SIGCHLD
     if (pid == 0) /* Not yet exited */
       continue;
+#endif
 #endif
 
     if (pid == -1) {
@@ -204,9 +253,33 @@ static int uv__process_init_stdio(uv_stdio_container_t* container, int fds[2]) {
     if (container->data.stream->type != UV_NAMED_PIPE)
       return UV_EINVAL;
     else {
+#if defined(__wasi__)
+      if ((container->flags & UV_READABLE_PIPE) &&
+          !(container->flags & UV_WRITABLE_PIPE)) {
+        ret = uv_pipe(fds, 0, 0);
+        if (ret == 0) {
+          /* Parent writes to stdin, child reads from fd 0. */
+          int tmp = fds[0];
+          fds[0] = fds[1];
+          fds[1] = tmp;
+        }
+      } else if ((container->flags & UV_WRITABLE_PIPE) &&
+                 !(container->flags & UV_READABLE_PIPE)) {
+        /* Child writes stdout/stderr, parent reads. */
+        ret = uv_pipe(fds, 0, 0);
+      } else {
+        ret = uv_socketpair(SOCK_STREAM, 0, fds, 0, 0);
+      }
+#else
       ret = uv_socketpair(SOCK_STREAM, 0, fds, 0, 0);
+#endif
 
-      if (ret == 0)
+      if (ret == 0
+#if defined(__wasi__)
+          && (container->flags & UV_READABLE_PIPE) != 0
+          && (container->flags & UV_WRITABLE_PIPE) != 0
+#endif
+      )
         for (i = 0; i < 2; i++) {
           setsockopt(fds[i], SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
           setsockopt(fds[i], SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
@@ -419,6 +492,7 @@ static void uv__process_child_init(const uv_process_options_t* options,
 }
 
 
+#if defined(__APPLE__) || defined(__wasi__)
 #if defined(__APPLE__)
 typedef struct uv__posix_spawn_fncs_tag {
   struct {
@@ -466,8 +540,15 @@ static void uv__spawn_init_posix_spawn(void) {
   /* Init feature detection for POSIX_SPAWN_SETSID flag */
   uv__spawn_init_can_use_setsid();
 }
+#endif
+#endif
 
+static int uv__spawn_resolve_and_spawn(const uv_process_options_t* options,
+                                       posix_spawnattr_t* attrs,
+                                       posix_spawn_file_actions_t* actions,
+                                       pid_t* pid);
 
+#if defined(__APPLE__)
 static int uv__spawn_set_posix_spawn_attrs(
     posix_spawnattr_t* attrs,
     const uv__posix_spawn_fncs_t* posix_spawn_fncs,
@@ -659,6 +740,7 @@ error:
   (void) posix_spawn_file_actions_destroy(actions);
   return err;
 }
+#endif
 
 char* uv__spawn_find_path_in_env(char** env) {
   char** env_iterator;
@@ -713,6 +795,13 @@ static int uv__spawn_resolve_and_spawn(const uv_process_options_t* options,
     while (err == EINTR);
     return err;
   }
+
+#if defined(__wasi__)
+  do
+    err = posix_spawnp(pid, options->file, actions, attrs, options->args, env);
+  while (err == EINTR);
+  return err;
+#endif
 
   /* Look for the definition of PATH in the provided env */
   path = uv__spawn_find_path_in_env(env);
@@ -776,7 +865,7 @@ static int uv__spawn_resolve_and_spawn(const uv_process_options_t* options,
   return err;
 }
 
-
+#if defined(__APPLE__)
 static int uv__spawn_and_init_child_posix_spawn(
     const uv_process_options_t* options,
     int stdio_count,
@@ -814,6 +903,194 @@ static int uv__spawn_and_init_child_posix_spawn(
 error:
   /* In an error situation, the attributes and file actions are
    * already destroyed, only the happy path requires cleanup */
+  return UV__ERR(err);
+}
+#endif
+
+#if defined(__wasi__)
+static int uv__spawn_set_posix_spawn_attrs_wasi(
+    posix_spawnattr_t* attrs,
+    const uv_process_options_t* options) {
+  int err;
+
+  err = posix_spawnattr_init(attrs);
+  if (err != 0)
+    return err;
+
+  if (options->flags & (UV_PROCESS_SETUID | UV_PROCESS_SETGID)) {
+    err = ENOSYS;
+    goto error;
+  }
+
+  if (options->flags & UV_PROCESS_DETACHED) {
+    err = ENOSYS;
+    goto error;
+  }
+
+  return 0;
+
+error:
+  (void) posix_spawnattr_destroy(attrs);
+  return err;
+}
+
+
+static int uv__spawn_set_posix_spawn_file_actions_wasi(
+    posix_spawn_file_actions_t* actions,
+    const uv_process_options_t* options,
+    int stdio_count,
+    int (*pipes)[2]) {
+  int err;
+  int fd;
+  int fd2;
+  int use_fd;
+
+  err = posix_spawn_file_actions_init(actions);
+  if (err != 0)
+    return err;
+
+  if (options->cwd != NULL) {
+    err = posix_spawn_file_actions_addchdir_np(actions, options->cwd);
+    if (err != 0)
+      goto error;
+  }
+
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+    if (use_fd < 0)
+      continue;
+    if (use_fd != fd && use_fd >= stdio_count)
+      continue;
+
+#ifdef F_DUPFD_CLOEXEC
+    pipes[fd][1] = fcntl(use_fd, F_DUPFD_CLOEXEC, stdio_count);
+#else
+    pipes[fd][1] = fcntl(use_fd, F_DUPFD, stdio_count);
+#endif
+    if (pipes[fd][1] == -1) {
+      err = errno;
+      goto error;
+    }
+
+#ifndef F_DUPFD_CLOEXEC
+    err = uv__cloexec(pipes[fd][1], 1);
+    if (err != 0)
+      goto error;
+#endif
+  }
+
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+
+    if (use_fd < 0) {
+      if (fd >= 3)
+        continue;
+
+      use_fd = open("/dev/null", fd == 0 ? O_RDONLY : O_RDWR);
+      if (use_fd < 0) {
+        err = errno;
+        goto error;
+      }
+
+      err = uv__cloexec(use_fd, 1);
+      if (err != 0) {
+        uv__close(use_fd);
+        goto error;
+      }
+
+      pipes[fd][1] = use_fd;
+    }
+
+    use_fd = pipes[fd][1];
+    if (use_fd == fd)
+      continue;
+
+    err = posix_spawn_file_actions_adddup2(actions, use_fd, fd);
+    if (err != 0)
+      goto error;
+
+    uv__nonblock_fcntl(use_fd, 0);
+  }
+
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+    if (use_fd < 0)
+      continue;
+    if (use_fd < stdio_count && use_fd == fd)
+      continue;
+
+    for (fd2 = 0; fd2 < fd; fd2++) {
+      if (pipes[fd2][1] == use_fd)
+        break;
+    }
+    if (fd2 < fd)
+      continue;
+
+    err = posix_spawn_file_actions_addclose(actions, use_fd);
+    if (err != 0)
+      goto error;
+  }
+
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][0];
+    if (use_fd < 0)
+      continue;
+
+    for (fd2 = 0; fd2 < fd; fd2++) {
+      if (pipes[fd2][0] == use_fd)
+        break;
+    }
+    if (fd2 < fd)
+      continue;
+
+    for (fd2 = 0; fd2 < stdio_count; fd2++) {
+      if (pipes[fd2][1] == use_fd)
+        break;
+    }
+    if (fd2 < stdio_count)
+      continue;
+
+    err = posix_spawn_file_actions_addclose(actions, use_fd);
+    if (err != 0)
+      goto error;
+  }
+
+  return 0;
+
+error:
+  (void) posix_spawn_file_actions_destroy(actions);
+  return err;
+}
+
+
+static int uv__spawn_and_init_child_posix_spawn_wasi(
+    const uv_process_options_t* options,
+    int stdio_count,
+    int (*pipes)[2],
+    pid_t* pid) {
+  int err;
+  posix_spawnattr_t attrs;
+  posix_spawn_file_actions_t actions;
+
+  err = uv__spawn_set_posix_spawn_attrs_wasi(&attrs, options);
+  if (err != 0)
+    goto error;
+
+  err = uv__spawn_set_posix_spawn_file_actions_wasi(&actions,
+                                                    options,
+                                                    stdio_count,
+                                                    pipes);
+  if (err != 0) {
+    (void) posix_spawnattr_destroy(&attrs);
+    goto error;
+  }
+
+  err = uv__spawn_resolve_and_spawn(options, &attrs, &actions, pid);
+
+  (void) posix_spawn_file_actions_destroy(&actions);
+  (void) posix_spawnattr_destroy(&attrs);
+
+error:
   return UV__ERR(err);
 }
 #endif
@@ -901,6 +1178,15 @@ static int uv__spawn_and_init_child(
   if (err != UV_ENOSYS)
     return err;
 
+#endif
+
+#if defined(__wasi__)
+  err = uv__spawn_and_init_child_posix_spawn_wasi(options,
+                                                  stdio_count,
+                                                  pipes,
+                                                  pid);
+  if (err != UV_ENOSYS)
+    return err;
 #endif
 
   /* This pipe is used by the parent to wait until

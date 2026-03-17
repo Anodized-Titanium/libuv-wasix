@@ -24,12 +24,26 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <string.h>
+
+static char* uv__process_argv0;
 
 char** uv_setup_args(int argc, char** argv) {
+  if (uv__process_argv0 != NULL) {
+    uv__free(uv__process_argv0);
+    uv__process_argv0 = NULL;
+  }
+
+  if (argc > 0 && argv != NULL && argv[0] != NULL) {
+    uv__process_argv0 = uv__strdup(argv[0]);
+  }
+
   return argv;
 }
 
 void uv__process_title_cleanup(void) {
+  uv__free(uv__process_argv0);
+  uv__process_argv0 = NULL;
 }
 
 int uv_set_process_title(const char* title) {
@@ -42,4 +56,21 @@ int uv_get_process_title(char* buffer, size_t size) {
 
   buffer[0] = '\0';
   return 0;
+}
+
+int uv_exepath(char* buffer, size_t* size) {
+  ssize_t copied;
+
+  if (buffer == NULL || size == NULL || *size == 0)
+    return UV_EINVAL;
+
+  if (uv__process_argv0 == NULL)
+    return UV_ENOENT;
+
+  copied = uv__strscpy(buffer, uv__process_argv0, *size);
+  *size -= 1;
+  if (copied >= 0 && *size > (size_t) copied)
+    *size = (size_t) copied;
+
+  return copied < 0 ? UV_ENOBUFS : 0;
 }
