@@ -489,6 +489,10 @@ int uv__tcp_keepalive(int fd, int on, unsigned int delay) {
   if (delay < 1)
     return UV_EINVAL;
 
+#if defined(__wasi__) || defined(__wasm32__)
+  return 0;
+#endif
+
 #ifdef __sun
   /* The implementation of TCP keep-alive on Solaris/SmartOS is a bit unusual
    * compared to other Unix-like systems.
