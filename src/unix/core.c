@@ -522,7 +522,7 @@ int uv__socket(int domain, int type, int protocol) {
   int sockfd;
   int err;
 
-#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC) && !defined(__wasi__) && !defined(__wasm32__)
   sockfd = socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
   if (sockfd != -1)
     return sockfd;
