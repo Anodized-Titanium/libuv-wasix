@@ -60,7 +60,6 @@ struct uv__stream_select_s {
 };
 #endif /* defined(__APPLE__) */
 
-#ifndef __wasi__
 union uv__cmsg {
   struct cmsghdr hdr;
   /* This cannot be larger because of the IBMi PASE limitation that
@@ -70,7 +69,6 @@ union uv__cmsg {
 };
 
 STATIC_ASSERT(256 == sizeof(union uv__cmsg));
-#endif
 
 static void uv__stream_connect(uv_stream_t*);
 static void uv__write(uv_stream_t* stream);
@@ -780,7 +778,6 @@ static int uv__try_write(uv_stream_t* stream,
    * inside the iov each time we write. So there is no need to offset it.
    */
   if (send_handle != NULL) {
-#ifndef __wasi__
     int fd_to_send;
     struct msghdr msg;
     union uv__cmsg cmsg;
@@ -811,10 +808,6 @@ static int uv__try_write(uv_stream_t* stream,
     do
       n = sendmsg(uv__stream_fd(stream), &msg, 0);
     while (n == -1 && errno == EINTR);
-#else
-    /* WASI does not support msghdr. */
-    return UV_ENOSYS;
-#endif  /* !__wasi__ */
   } else {
     do
       n = uv__writev(uv__stream_fd(stream), iov, iovcnt);
@@ -1034,10 +1027,8 @@ static int uv__stream_recv_cmsg(uv_stream_t* stream, struct msghdr* msg) {
 static void uv__read(uv_stream_t* stream) {
   uv_buf_t buf;
   ssize_t nread;
-#ifndef __wasi__
   struct msghdr msg;
   union uv__cmsg cmsg;
-#endif
   int count;
   int err;
   int is_ipc;
@@ -1076,7 +1067,6 @@ static void uv__read(uv_stream_t* stream) {
       }
       while (nread < 0 && errno == EINTR);
     } else {
-#ifndef __wasi__
       /* ipc uses recvmsg */
       msg.msg_flags = 0;
       msg.msg_iov = (struct iovec*) &buf;
@@ -1091,11 +1081,6 @@ static void uv__read(uv_stream_t* stream) {
         nread = uv__recvmsg(uv__stream_fd(stream), &msg, 0);
       }
       while (nread < 0 && errno == EINTR);
-#else
-      /* WASI does not support msghdr. */
-      nread = -1;
-      errno = ENOSYS;
-#endif  /* !__wasi__ */
     }
 
     if (nread < 0) {

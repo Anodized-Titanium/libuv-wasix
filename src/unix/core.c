@@ -731,14 +731,14 @@ int uv__cloexec(int fd, int set) {
 }
 
 
-#ifndef __wasi__
 ssize_t uv__recvmsg(int fd, struct msghdr* msg, int flags) {
 #if defined(__ANDROID__)   || \
     defined(__DragonFly__) || \
     defined(__FreeBSD__)   || \
     defined(__NetBSD__)    || \
     defined(__OpenBSD__)   || \
-    defined(__linux__)
+    defined(__linux__)     || \
+    defined(__wasi__)
   ssize_t rc;
   rc = recvmsg(fd, msg, flags | MSG_CMSG_CLOEXEC);
   if (rc == -1)
@@ -764,7 +764,6 @@ ssize_t uv__recvmsg(int fd, struct msghdr* msg, int flags) {
   return rc;
 #endif
 }
-#endif
 
 
 int uv_cwd(char* buffer, size_t* size) {
